@@ -1,0 +1,81 @@
+# Routing layer: model route with priority fallback + token accounting,
+# and ONE BackendTrafficPolicy on the generated HTTPRoute for retries + token quota.
+# (One policy on purpose: a route-level BackendTrafficPolicy replaces a Gateway-level one
+#  for that route, so splitting retry and rateLimit across two targets would drop one.)
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: ai-gw-route              # generated HTTPRoute gets this same name
+  namespace: default
+spec:
+  parentRefs:
+    - name: ai-gw
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: llama-3-8b      # the "model" clients send
+      backendRefs:
+        - name: vllm
+          priority: 0                # primary
+          # modelNameOverride: meta-llama/Meta-Llama-3-8B-Instruct  # set to vLLM --served-model-name if different
+        - name: openrouter
+          priority: 1                # fallback
+          modelNameOverride: meta-llama/llama-3.1-8b-instruct
+  llmRequestCosts:
+    - metadataKey: llm_input_token
+      type: InputToken
+    - metadataKey: llm_output_token
+      type: OutputToken
+    - metadataKey: llm_total_token
+      type: TotalToken
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: ai-gw-route-policy
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: ai-gw-route
+  # ---- Fallback: one attempt per priority, then move to the next priority ----
+  retry:
+    numAttemptsPerPriority: 1
+    numRetries: 3
+    perRetry:
+      backOff:
+        baseInterval: 100ms
+        maxInterval: 2s
+      timeout: 60s
+    retryOn:
+      httpStatusCodes: [500, 502, 503, 504]
+      triggers:
+        - connect-failure
+        - retriable-status-codes
+  # ---- Quota: total tokens per tenant per hour (Redis-backed global rate limit) ----
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id     # set by SecurityPolicy from the API key
+                  type: Distinct
+          limit:
+            requests: 100000            # tokens / hour / tenant  (use 50 to test quickly)
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0                 # don't charge at request time
+            response:
+              from: Metadata            # charge actual tokens after the response
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_total_token

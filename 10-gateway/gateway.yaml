@@ -1,0 +1,91 @@
+# Gateway layer: GatewayClass + EnvoyProxy (metrics) + Gateway + client API-key auth
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ai-gw
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+# EnvoyProxy: Prometheus metrics are ON by default (port name "metrics", :19001/stats/prometheus).
+# The AI Gateway sidecar also exposes gen_ai_* metrics on the "aigw-admin" port.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: ai-gw
+  namespace: default
+spec:
+  telemetry:
+    metrics:
+      prometheus:
+        disable: false
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          resources: {}        # clear big default requests for kind
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-gw
+  namespace: default
+spec:
+  gatewayClassName: ai-gw
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: ai-gw
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: ai-gw-buffer
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gw
+  connection:
+    bufferLimit: 50Mi
+---
+# Client auth: key name = tenant/client id, value = API key.
+# Change these keys before using anywhere real.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: client-api-keys
+  namespace: default
+type: Opaque
+stringData:
+  tenant-a: key-tenant-a-123
+  tenant-b: key-tenant-b-456
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ai-gw-apikey-auth
+  namespace: default
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ai-gw
+  apiKeyAuth:
+    credentialRefs:
+      - group: ""
+        kind: Secret
+        name: client-api-keys
+    extractFrom:
+      - headers:
+          - x-api-key
+    # Tenant id comes from the matched key, not from the client -> used by the token quota.
+    forwardClientIDHeader: x-tenant-id
+    sanitize: true             # strip x-api-key before it reaches vLLM/OpenRouter

@@ -1,0 +1,28 @@
+# Primary backend: in-cluster vLLM (OpenAI-compatible, port 8000, no TLS, no key).
+# Point "hostname" at your real vLLM Service. If you have no vLLM on kind,
+# apply 20-backends/fake-vllm.yaml - it creates a "vllm" Service with a test upstream.
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: vllm.default.svc.cluster.local
+        port: 8000
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata:
+  name: vllm
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+    prefix: /v1                # vLLM serves /v1/chat/completions
+  backendRef:
+    name: vllm
+    kind: Backend
+    group: gateway.envoyproxy.io
